@@ -34,6 +34,8 @@ from time import sleep
 from platform import node
 import tzlocal
 import tempfile
+import re
+
 
 
 
@@ -51,6 +53,8 @@ OMServer = None
 OMInternal = None # Private name of OM Server
 DBURI = "mongodb://localhost:27017"
 logger = None
+validID = re.compile("^[a-fA-F0-9]{24}$")
+alertTypeNames = ["HOST", "REPLICA_SET", "CLUSTER", "AGENT", "BACKUP"]
 
 
 myRealName = socket.gethostname()
@@ -212,6 +216,19 @@ class cntrlDB:
             raise dbError('logEvent: Failure to insert event - "{}".'.format(message))
         return 
     
+    def getProjConfig(self):
+        projectConfig = {"_id": self.projectId}
+        config_doc = self.configColl.find_one(projectConfig)
+        return config_doc
+    
+    def updateProjConfig(self,newDoc):
+        projectConfig = {"_id": self.projectId}
+        newDoc.pop("_id",None)  #remove the _id if it exists
+        status = self.configColl.replace_one(projectConfig,newDoc, upsert=True)
+        if (status.matched_count != 1) and (status.upserted_id is None):
+            raise dbError("updateProjConfig: Config Record was not updated for {}".format(self.projectId))
+        return 
+    
 class myLogger:
     
     DEBUG = 0
@@ -303,9 +320,11 @@ class OpsManager:
         self.Server = omUri
         self.internalName = omInternal
         
-    def doRequest(self,method):
+    def doRequest(self,method,notFoundOK=False):
         response = requests.get(self.OMRoot+method, auth=HTTPDigestAuth(publicKey, privateKey))
         if (response.status_code != 200) :
+            if (response.status_code == 404) and notFoundOK:
+                return
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
                 raise fatalError(self.OMRoot+method+": "+str(resp["error"])+": ",resp["detail"])
@@ -656,9 +675,109 @@ def dcMapping(hostname):
         return(host2dc[dcpart])
     return("uk")
 
-def genTags(projectInfo,auto):
+def getMongosInfo(projectInfo,auto,db):
+    projectCfg = db.getProjConfig()
+    #
+    # Build a list of MONGOS processes
+    #
+    if projectCfg is None:
+        projectCfg = {"projectName": projectInfo["name"], "orgId": projectInfo["orgId"], "projectId": projectInfo["id"],\
+                      "disableAlerts": [], "maintainanceMode": []}
+        projectCfg["mongos"] = {}
+    #
+    # Build a list of existing mongos to check for any deleted one
+    #
+    existingNodes = []
+    for node in projectCfg["mongos"]:
+        existingNodes.append(node)
+    # Loop through the automation config 
+    clusters = {}
+    for host in auto.config["processes"]:
+        if host["processType"] == "mongos":
+            if host["name"] in projectCfg["mongos"]:
+                try:
+                    existingNodes.remove(host["name"])
+                except Exception:
+                    pass
+                projectCfg["mongos"][host["name"]]["hostname"] = host["hostname"]
+                projectCfg["mongos"][host["name"]]["cluster"] = host["cluster"]
+            else:
+                projectCfg["mongos"][host["name"]] = {"hostname": host["hostname"], "cluster": host["cluster"], "tags": {}}
+            if not (host["cluster"] in clusters):
+                clusters[host["cluster"]] = []
+            clusters[host["cluster"]].append({"name": host["name"], "tags": projectCfg["mongos"][host["name"]]["tags"]})
+    
+    if len(existingNodes) > 0:
+        for node in existingNodes:
+            projectCfg["mongos"][node]["deleted"] = True 
+            clusters[projectCfg["mongos"][node]["cluster"]].append({"name": node, "deleted": True})
+            
+    return clusters, projectCfg
+    
+def genTags(projectInfo,auto,db):
     projectDoc = {"projectName": projectInfo["name"], "orgId": projectInfo["orgId"], "projectId": projectInfo["id"]}
-    allNodes = []
+    clusters, projectCfg = getMongosInfo(projectInfo,auto,db)
+    #
+    # Copy any Alerts or Maintainance Settings
+    #
+    if "alerts" in projectCfg:
+        projectDoc["alerts"] = projectCfg["alerts"]
+    else:
+        projectDoc["alerts"] = []
+        
+    if "maintainanceAlertGroups" in projectCfg:
+        projectDoc["maintainanceAlertGroups"] = projectCfg["maintainanceAlertGroups"]
+    else:
+        projectDoc["maintainanceAlertGroups"] = []
+    #
+    # Now generate the tag file  for the mongos
+    #  
+    serverNodes = []
+    clusterProcs = []
+    for cluster in clusters:
+        # Look for existing patchGroup Settings
+        setTags = {"cluster": cluster }
+        hosts = clusters[cluster]
+        nodes = []
+        groupsInSet = [False,False,False,False,False,False,False,False]
+        for node in hosts:
+            if "tags" in node:
+                if "patchGroup" in node["tags"]:
+                    pg = node["tags"]["patchGroup"]
+                    if type(pg) == int:
+                        groupsInSet[pg] = True
+        # Now set missing ones
+        for node in hosts:  
+            myHostName = projectCfg["mongos"][node["name"]]["hostname"]
+            if  ("deleted" in node) and (node["deleted"]):
+                nodeTags = {"nodeName": node["name"], "hostName": myHostName, "deleted": True}
+            else: 
+                if ("tags" not in node) or (len(node["tags"]) == 0):
+                    tags = {}
+                    tags["dc"] = dcMapping(myHostName)
+                    for i in range(8):
+                        if not groupsInSet[i]:
+                            groupsInSet[i] = True
+                            tags["patchGroup"] = i
+                            break
+                else:
+                    tags = node["tags"]
+                    if "dc" not in tags:
+                        tags["dc"] = dcMapping(myHostName)
+                    if "patchGroup" not in tags:
+                        for i in range(8):
+                            if not groupsInSet[i]:
+                                groupsInSet[i] = True
+                                tags["patchGroup"] = str(i)
+                                break
+                nodeTags = {"nodeName": node["name"], "hostName": myHostName, "tags": tags} 
+            nodes.append(nodeTags)
+        setTags["mongos"] = nodes
+        clusterProcs.append(setTags)
+    projectDoc["shardedClusters"] = clusterProcs
+    #
+    # Now tags for the servers
+
     for replset in auto.config["replicaSets"]:
         # Look for existing patchGroup Settings
         setTags = {"replicaSet": replset["_id"] }
@@ -695,15 +814,78 @@ def genTags(projectInfo,auto):
             nodeTags = {"nodeName": node["host"], "hostName": myHostName, "tags": tags}  
             nodes.append(nodeTags)
         setTags["nodes"] = nodes
-        allNodes.append(setTags)
-    projectDoc["replicaSets"] = allNodes
+        serverNodes.append(setTags)
+    projectDoc["replicaSets"] = serverNodes
+    db.updateProjConfig(projectCfg)
     return(projectDoc)
                   
-def setTags(auto,tagDoc):
-    # First build a lookup table to the automation dictionary
+def setTags(auto,tagDoc,projectInfo,db,om):
+    # First get the Mongos Definition from the project config document
+    _, projectCfg = getMongosInfo(projectInfo, auto, db)
+    status = 0   # No changes yet
+    #
+    # First Check for updated Alert or Maintainance config
+    #
+    validAlerts = []
+    allValid = True
+    if "alerts" in tagDoc:
+        for alert in tagDoc["alerts"]:
+            if isinstance(alert, str) and (not validID.fullmatch(alert) is None):
+                alrt = om.doRequest("/groups/"+projectInfo["id"]+"/alertConfigs/"+alert,notFoundOK=True)
+                if alrt is None:
+                    allValid = False
+                    logger.logMessage('AlertID "{}" does not exist.'.format(alert))
+                else:
+                    validAlerts.append(alert)
+            else:
+                allValid = False
+                logger.logMessage('AlertID "{}" is not valid'.format(alert))
+        if allValid :
+            if ((not "alerts" in projectCfg) and (len(validAlerts) > 0)) or (validAlerts != projectCfg['alerts']):
+                projectCfg['alerts'] =validAlerts
+                status |= 4
+                
+    validMaint = [] 
+    allValid = True           
+    if "maintainanceAlertGroups" in tagDoc:
+        for maint in tagDoc["maintainanceAlertGroups"]:
+            if isinstance(maint,str) and (maint in alertTypeNames):
+                validMaint.append(maint)
+            else:
+                allValid = False
+                logger.logMessage('Alert type "{}" is not valid'.format(maint))
+        if allValid:
+            if ((not "maintainanceAlertGroups" in projectCfg) and (len(validMaint) > 0))\
+                or (validMaint != projectCfg['maintainanceAlertGroups']):
+                projectCfg["maintainanceAlertGroups"] = validMaint
+                status |=8
+    #
+    # Apply any updates to the mongos's
+    #
+    if "shardedClusters" in tagDoc:
+        for cluster in tagDoc["shardedClusters"]:
+            if "mongos" in cluster:
+                for node in cluster["mongos"]:
+                    if ("deleted" in node) and node["deleted"]:
+                        key = node["nodeName"]
+                        mongos = projectCfg["mongos"]
+                        del mongos[key]
+                        logger.logInfo("Node {} removed from the project config.".format(node["hostName"]))
+                        status |=  2
+                    else:
+                        try:
+                            currentTags =  projectCfg["mongos"][node["nodeName"]]["tags"]
+                        except Exception:
+                            currentTags = {}
+                            pass
+                        if node["tags"] != currentTags:
+                            status |=  2   # Config changed
+                            projectCfg["mongos"][node["nodeName"]]["tags"] = node["tags"].copy()
+                            
+
     dumpJSON(auto.config,"orig_config.json")
     automation = auto.config
-    # Now loop through the input file 
+    # Now loop through the replica sets
     added = changed = deleted = 0
     for replSet in tagDoc["replicaSets"]:
         for node in replSet["nodes"]:
@@ -728,8 +910,12 @@ def setTags(auto,tagDoc):
                     else:
                         logger.Info("No tags to set for "+node["nodeName"]+".")
     logging.info("About to add new tags to "+str(added)+" update "+str(changed)+" and delete tags from "+str(deleted)+" nodes.")
-    dumpJSON(automation,"new_config.json")                
-    return automation
+    if (added + changed + deleted) > 0:
+        status |= 1
+    dumpJSON(automation,"new_config.json")   
+    if status > 1:
+        db.updateProjConfig(projectCfg)             
+    return automation, status
 
 
                   
@@ -807,7 +993,7 @@ USAGE
         endpoint = OpsManager(OMServer,OMInternal)
         # load or save tags from anywhere
         if (args.generate or args.load) and args.project is not None:
-            projectInfo = endpoint.doRequest("groups/byName/"+args.project)
+            projectInfo = endpoint.doRequest("/groups/byName/"+args.project)
             projectId = projectInfo["id"]
         else:
             hostInfo = endpoint.findHost(myName)
@@ -839,7 +1025,7 @@ USAGE
                 f = open(args.outFile, "w")
             except Exception as e:
                 raise cmdError("Error opening "+args.outFile+" "+format(e))
-            f.write(json.dumps(genTags(projectInfo,auto),indent=4))
+            f.write(json.dumps(genTags(projectInfo,auto,db),indent=4))
             f.close()
             return 0
         elif args.load:
@@ -854,13 +1040,22 @@ USAGE
             except Exception as e:
                 raise cmdError("Error reading "+args.inFile+" "+format(e))
                 return(2)
-            newAutomation = setTags(auto,tagDoc)
-            status = auto.deployChanges(newAutomation)
-            if status == 0:
-                logger.logMessage("Tags loaded",logDB=True)
-                return(0)
+            newAutomation, tagStatus = setTags(auto,tagDoc,projectInfo,db,endpoint)
+            if (tagStatus % 2) == 1: #lsb indicates automation change
+                status = auto.deployChanges(newAutomation)
+                if status == 0:
+                    if tagStatus > 1:
+                        logger.logMessage("Tags loaded and Project Config modified for {}.".format(projName),logDB=True)
+                    else:
+                        logger.logMessage("Tags loaded for project {}.".format(projName),logDB=True)
+                    return(0)
+                else:
+                    raise fatalError("Error deploying new tags")
+            elif tagStatus > 1:  # projectConfig changed
+                logger.logMessage("Project {}, config updated.".format(projName),logDB=True)
             else:
-                raise fatalError("Error deploying new tags")
+                logger.logMessage("No changes found")
+            return 0
 
         #
         # Tag file options handled we must be starting or stopping
