@@ -896,7 +896,7 @@ def getVariables():
         
 
  
- # TODO - Create WF specific mapping                   
+# TODO - Create WF specific mapping                   
 def dcMapping(hostname):
     host2dc = {"16": "cc","17": "cc","21": "cc","22": "ss","24": "sv","25": "sv","26": "sv","27": "ox","28": "ox","29": "ox","30": "az","31": "sl"}
     dcpart = hostname[10:12]
