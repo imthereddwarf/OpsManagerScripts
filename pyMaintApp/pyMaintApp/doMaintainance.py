@@ -36,8 +36,7 @@ import tzlocal
 import tempfile
 import re
 import math 
-from pickle import FALSE, TRUE
-from dns.rdataclass import NONE
+
 
 
 
