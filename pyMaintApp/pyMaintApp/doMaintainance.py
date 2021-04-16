@@ -469,7 +469,7 @@ class automation:
         #
         # Get mongos tags
         #
-        if "mongos" in self.prjConfig:
+        if (self.prjConfig != None) and ("mongos" in self.prjConfig):
             for nodeName in self.prjConfig["mongos"]:
                 node = self.prjConfig["mongos"][nodeName]
                 if "tags" in node:
@@ -911,7 +911,7 @@ def getMongosInfo(projectInfo,auto,db):
     #
     if projectCfg is None:
         projectCfg = {"projectName": projectInfo["name"], "orgId": projectInfo["orgId"], "projectId": projectInfo["id"],\
-                      "disableAlerts": [], "maintainanceMode": []}
+                      "alerts": [], "maintainanceAlertGroups": []}
         projectCfg["mongos"] = {}
     #
     # Build a list of existing mongos to check for any deleted one
@@ -1246,8 +1246,9 @@ USAGE
         logger.db = db  
         
         prjConfig = db.getProjConfig()
-         
-        alrtCfg = alertConfig(endpoint,projectId,prjConfig["alerts"])
+        
+        if prjConfig is not None: 
+            alrtCfg = alertConfig(endpoint,projectId,prjConfig["alerts"])
         #
         #use the Project ID to get the automation config
         auto = automation(endpoint,projectId,projName,db)
