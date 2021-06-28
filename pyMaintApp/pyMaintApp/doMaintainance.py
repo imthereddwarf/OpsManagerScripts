@@ -36,6 +36,7 @@ import tzlocal
 import tempfile
 import re
 import math 
+from dns.rdataclass import NONE
 
 
 
@@ -212,6 +213,16 @@ class cntrlDB:
             raise dbError("endPatch: Control Record was not updated")
         return 0
     
+    def doReset(self):
+        if self.controlDoc["lockedBy"] != myName:
+            raise statusError("Control Doc is not locked by us.")
+        projectControl = {"_id": self.projectId}
+        changes = {"$unset": {"lockedBy": 1, "lockedAt": 1, "patchData": 1},"$set": {"status": self.COMPLETED}}
+        status = self.controlColl.update_one(projectControl,changes)
+        if status.matched_count != 1:
+            raise dbError("endPatch: Control Record was not updated")
+        return 0
+    
     def allDone(self,hostname):
         if (len(self.controlDoc["patchData"]["activeHosts"]) == 1) and (len(self.controlDoc["patchData"]["validatedHosts"]) == 0)\
                 and (hostname == self.controlDoc["patchData"]["activeHosts"][0]):
@@ -327,13 +338,16 @@ class myLogger:
         print(" ",file=self.file)
         
 class OpsManager:
-    def __init__(self,omUri,omInternal):
+    def __init__(self,omUri,omInternal,timeout=None,cafile=True):
         self.OMRoot = omUri+"/api/public/v1.0"
         self.Server = omUri
         self.internalName = omInternal
+        self.deployTimeout = timeout
+        self.OMsession = requests.Session()
+        self.OMSession.verify = cafile
         
     def doRequest(self,method,notFoundOK=False):
-        response = requests.get(self.OMRoot+method, auth=HTTPDigestAuth(publicKey, privateKey))
+        response = self.OMSession.get(self.OMRoot+method, auth=HTTPDigestAuth(publicKey, privateKey))
         if (response.status_code != 200) :
             if (response.status_code == 404) and notFoundOK:
                 return
@@ -347,7 +361,7 @@ class OpsManager:
         return(response.json())
 
     def doPut(self,method,postData):
-        response = requests.put(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        response = self.OMSession.put(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
         if (response.status_code != 200) :
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
@@ -358,7 +372,7 @@ class OpsManager:
         return 0
     
     def doPost(self,method,postData):
-        response = requests.post(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        response = self.OMSession.post(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
         if (response.status_code >= 300) :
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
@@ -369,7 +383,7 @@ class OpsManager:
         return response.json()
     
     def doPatch(self,method,postData):
-        response = requests.patch(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        response = self.OMSession.patch(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
         if (response.status_code == 404):
             return None
         elif (response.status_code != 200) :
@@ -386,7 +400,7 @@ class OpsManager:
             request_url = url
         else:
             request_url = url.replace(self.internalName,self.Server)
-        response = requests.get(request_url, auth=HTTPDigestAuth(publicKey, privateKey))
+        response = self.OMSession.get(request_url, auth=HTTPDigestAuth(publicKey, privateKey))
         if (response.status_code != 200) :
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
@@ -463,7 +477,20 @@ class automation:
                                                       "type": process["processType"] }
             if process["processType"] != "mongos":
                 container = process ["args2_6"]["replication"]["replSetName"]
-                self.HostNodeMapping[process["hostname"]] = {"replicaSet": container,"name": process["name"], "isStopped": process["disabled"], "index": pIdx}
+                if process["hostname"] in self.HostNodeMapping:
+                    self.HostNodeMapping[process["hostname"]]["replicaSet"] = container
+                    self.HostNodeMapping[process["hostname"]]["name"] = process["name"]
+                    self.HostNodeMapping[process["hostname"]]["isStopped"] = process["disabled"]
+                    self.HostNodeMapping[process["hostname"]]["index"] = pIdx
+                else:
+                    self.HostNodeMapping[process["hostname"]] = {"replicaSet": container,"name": process["name"], "isStopped": process["disabled"], "index": pIdx}
+            else:
+                if process["hostname"] in self.HostNodeMapping:
+                    self.HostNodeMapping[process["hostname"]]["mongosName"] = process["name"]
+                    self.HostNodeMapping[process["hostname"]]["mongosIsStopped"] = process["disabled"]
+                    self.HostNodeMapping[process["hostname"]]["mongosIndex"] = pIdx
+                else:
+                    self.HostNodeMapping[process["hostname"]] = {"mongosName": process["name"], "mongosIsStopped": process["disabled"], "mongosIndex": pIdx}
             pIdx += 1
         
         #
@@ -489,6 +516,8 @@ class automation:
         
     def getPatchGroup(self,hostName):
         node = self.getNodeName(hostName)
+        if node == None:
+            return None
         tags = self.nodeTags[node]
         if "patchGroup" in tags:
             return tags["patchGroup"]
@@ -517,7 +546,12 @@ class automation:
         return self.NodeHostMapping[nodename]["isStopped"]
     
     def getNodeName(self,hostname):
-        return self.HostNodeMapping[hostname]["name"]
+        if hostname in self.HostNodeMapping:
+            if "name" in self.HostNodeMapping[hostname]:
+                return self.HostNodeMapping[hostname]["name"]
+            elif "mongosName" in self.HostNodeMapping[hostname]:
+                return self.HostNodeMapping[hostname]["mongosName"]
+        return None
     
     def getProcesses(self):
         return self.config["processes"]
@@ -615,8 +649,9 @@ class automation:
         prjConfig = self.prjConfig
         if maintId != None:
             now = datetime.now(timezone.utc)
-            maintData = {"endDate": now }
-            maintId = self.opsManager.doPost("/groups/"+prjConfig["projectId"]+"/maintenanceWindows/"+maintId,maintData)
+            endIso = now.isoformat()
+            maintData = {"endDate": endIso }
+            maintId = self.opsManager.doPatch("/groups/"+prjConfig["projectId"]+"/maintenanceWindows/"+maintId,maintData)
         #
         # Disable Specific Alerts
         #
@@ -830,7 +865,7 @@ class alertConfig:
                             logger.logInfo("Unexpected match operator {} alert {}"\
                                               .format(match["operator"],alert["id"]))
                     elif match["fieldName"] == "HOSTNAME_AND_PORT":
-                        if match['operator'] == "EQUALS":
+                        if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):  # Matches being used with a literal
                             components = match["value"].split(":")
                             host = components[0]
                             alertId = alert["id"]
@@ -840,6 +875,7 @@ class alertConfig:
                     else:
                         logger.logInfo("Unexpected match field Name {} alert {}"\
                                           .format(match["fieldName"],alert["id"]))
+#                    print("Found Alert {} for host {}.".format(alertId,host))
                     if not host == None:
                         if host in self.alertsByHost:
                             self.alertsByHost[host].append(alertId)
@@ -968,7 +1004,7 @@ def genTags(projectInfo,auto,db):
         setTags = {"cluster": cluster }
         hosts = clusters[cluster]
         nodes = []
-        groupsCounts = [0,0,0]
+        groupsCounts = [0,0,0,0,0]
         for node in hosts:
             if "tags" in node:
                 if "patchGroup" in node["tags"]:
@@ -1093,6 +1129,12 @@ def setTags(auto,tagDoc,projectInfo,db,om):
                 projectCfg["maintainanceAlertGroups"] = validMaint
                 status |=8
     #
+    # Build a list of host PatchGroup Mapping for validation
+    #
+    hostPGmapping = {}
+    configValid = True
+            
+    #
     # Apply any updates to the mongos's
     #
     if "shardedClusters" in tagDoc:
@@ -1114,6 +1156,13 @@ def setTags(auto,tagDoc,projectInfo,db,om):
                         if node["tags"] != currentTags:
                             status |=  2   # Config changed
                             projectCfg["mongos"][node["nodeName"]]["tags"] = node["tags"].copy()
+                        # Check for the samne host in multiple patch groups
+                        if node["hostName"] in hostPGmapping:
+                            if hostPGmapping[node["hostname"]] != node["tags"]["patchGroup"]:
+                                logger.logMessage("Mismatched Patch Groups for {}.".format(node["hostName"]))
+                                configValid = False
+                        else:
+                            hostPGmapping[node["hostname"]] = node["tags"]["patchGroup"]
                             
 
     dumpJSON(auto.config,"orig_config.json")
@@ -1142,6 +1191,16 @@ def setTags(auto,tagDoc,projectInfo,db,om):
                         added += 1
                     else:
                         logger.Info("No tags to set for "+node["nodeName"]+".")
+                # Check for the same host in multiple patch groups
+                if node["hostName"] in hostPGmapping:
+                    if hostPGmapping[node["hostname"]] != node["tags"]["patchGroup"]:
+                        logger.logMessage("Mismatched Patch Groups for {}.".format(node["hostName"]))
+                        configValid = False
+                else:
+                    hostPGmapping[node["hostname"]] = node["tags"]["patchGroup"]
+    if configValid == False:
+        logger.logError("One or more hosts in conflicting patch groups. Config load aborting.")
+        return None, 0
     logging.info("About to add new tags to "+str(added)+" update "+str(changed)+" and delete tags from "+str(deleted)+" nodes.")
     if (added + changed + deleted) > 0:
         status |= 1
@@ -1150,6 +1209,35 @@ def setTags(auto,tagDoc,projectInfo,db,om):
         db.updateProjConfig(projectCfg)             
     return automation, status
 
+def query_yes_no(question, default="yes"):
+    """Ask a yes/no question via raw_input() and return their answer.
+
+    "question" is a string that is presented to the user.
+    "default" is the presumed answer if the user just hits <Enter>.
+            It must be "yes" (the default), "no" or None (meaning
+            an answer is required of the user).
+
+    The "answer" return value is True for "yes" or False for "no".
+    """
+    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
+    if default is None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while True:
+        sys.stdout.write(question + prompt)
+        choice = input().lower()
+        if default is not None and choice == "":
+            return valid[default]
+        elif choice in valid:
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")
 
                   
     
@@ -1191,6 +1279,8 @@ USAGE
         parser.add_argument('--input', '-i', dest="inFile", metavar='inFile', help="Input Tag Definition")
         parser.add_argument('--logfile', '-l', dest="logFile", metavar='logFile', help="Redirect Messages to a file")
         parser.add_argument('--hostname', dest="host", metavar='host', help="Override the hostname")
+        parser.add_argument('--CA', dest="cacert", metavar='cacert', help="Specify the path to the CA public cert")
+        parser.add_argument('--deployTimeout', dest="deployTO", metavar='deployTO', help="Time to wait (seconds) for Deploy to complete")
         
         feature_parser = parser.add_mutually_exclusive_group(required=True)
         feature_parser.add_argument('--generateTagFile', dest='generate', action='store_true')
@@ -1198,6 +1288,8 @@ USAGE
         feature_parser.add_argument('--start', dest='start', action='store_true')
         feature_parser.add_argument('--finish', dest='end', action='store_true')
         feature_parser.add_argument('--failsafe', dest='failsafe', action='store_true')
+        feature_parser.add_argument('--resetProject', dest="resetPrj", action='store_true')
+        feature_parser.add_argument('--status', dest="status", action='store_true')
         
 
 
@@ -1223,9 +1315,27 @@ USAGE
         
         logger.logInfo(program_short_version_message)
         
-        endpoint = OpsManager(OMServer,OMInternal)
+        deployTO = None
+        if args.deployTO is not None:
+            try:
+                deployTO = int(args.deployTO)
+            except ValueError:
+                logger.logError('Timeout value "{}" should be an integer'.format(args.deployTO) )
+                return 1
+            
+
+        cafile = True 
+        if args.cacert is not None:
+            if args.cacert.lower() == "ignore":
+                cafile = False
+            elif os.path.exists(args.cacert):
+                cafile = args.cacert
+            else:
+                logger.logError('CA Bundle "{}" does not exist.'.format(args.cacert))
+        endpoint = OpsManager(OMServer,OMInternal,deployTO,cafile)
+    
         # load or save tags from anywhere
-        if (args.generate or args.load) and args.project is not None:
+        if (args.generate or args.load or args.status or args.resetPrj) and args.project is not None:
             projectInfo = endpoint.doRequest("/groups/byName/"+args.project)
             projectId = projectInfo["id"]
         else:
@@ -1246,6 +1356,15 @@ USAGE
         logger.db = db  
         
         prjConfig = db.getProjConfig()
+        
+        if args.resetPrj:
+            prjStatus = db.getLock()
+            if not query_yes_no("Current maintainance status: "+prjStatus+" OK to reset?"):
+                logger.logMessage("Reset aborted!")
+                return 1   #abort
+            db.doReset()
+            return 0
+            
         
         if prjConfig is not None: 
             alrtCfg = alertConfig(endpoint,projectId,prjConfig["alerts"])
