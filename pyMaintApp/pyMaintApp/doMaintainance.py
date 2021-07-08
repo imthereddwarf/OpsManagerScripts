@@ -37,7 +37,11 @@ import tempfile
 import re
 import math 
 import urllib3
-from pickle import TRUE
+from dateutil import tz
+from dns.rdataclass import NONE
+import argparse
+from pickle import TRUE, FALSE
+
 
 
 
@@ -60,6 +64,7 @@ OMServer = None
 OMInternal = None # Private name of OM Server
 DBURI = "mongodb://localhost:27017"
 tokenLocation = "/tmp/MONGODB_MAINTAINANCE_IN_PROGRESS"
+failsafeLogLocation = "/tmp"
 agentCommand = None
 logger = None
 validID = re.compile("^[a-fA-F0-9]{24}$")
@@ -174,6 +179,10 @@ class cntrlDB:
             elif hostname in self.controlDoc["patchData"]["completedHosts"]:
                 self.doUnlock()
                 raise statusError(hostname+" has already finished Maintainance")
+            elif hostname in self.controlDoc["patchData"]["skippedHosts"]:
+                logger.logWarning("{} is being skipped.".format(hostname),logDB=True)
+                self.doUnlock()
+                return 1
             else:
                 self.doUnlock()
                 raise statusError(hostname+" has not been prepared for Maintainance")
@@ -197,16 +206,18 @@ class cntrlDB:
                 logger.logError("Host {} has not yet been patched. Use --start before --finish.".format(hostname),logDB=True)
             elif myName in self.controlDoc["patchData"]["completedHosts"]:
                 logger.logMessage("Host {} has already completed patching.".format(hostname))
+            elif myName in self.controlDoc["patchData"]["skippedHosts"]:
+                logger.logMessage("Patching skipped for host {}.".format(hostname))
             else:
                 logger.logMessage("Host {} is not part of this patch group.".format(hostname))
             self.doUnlock()
             return False
                 
-    def startPatch(self,hosts,active,resetDoc,patchGroup,maintId, disabledAlerts, skippedHosts, originalConfig):
+    def startPatch(self,hosts,active,resetDoc,patchGroup,maintId, disabledAlerts, skippedHosts, originalConfig, failedNodes, goalVersion):
         now = datetime.now(timezone.utc)
         completed = []
         projectControl = {"_id": self.projectId}
-        patchData = {"patchCount": len(hosts), "currentPatchGroup": patchGroup, "validatedHosts": hosts,\
+        patchData = {"patchCount": len(hosts), "currentPatchGroup": patchGroup, "validatedHosts": hosts, "OMConfigVersion": goalVersion, \
                       "activeHosts": active, "completedHosts": completed, "skippedHosts": skippedHosts, "originalSettings": resetDoc, "lastUpdate":  now}
         if maintId != None:
             patchData["maintId"] = maintId
@@ -215,6 +226,8 @@ class cntrlDB:
         changes = {"$unset": {"lockedBy": 1, "lockedAt": 1},\
                    "$set": {"patchData": patchData, "status": self.HALTED, "originalConfig": originalConfig},\
                    "$currentDate": { "startTime": True}}
+        if len(failedNodes) > 0:
+            changes["$set"]["deployFailed"] = failedNodes
         status = self.getLock()
         if status != self.INPROGRESS:
             raise statusError('Control doc in "{}" state, "{}" expected.',status,self.INPROGRESS)
@@ -227,8 +240,19 @@ class cntrlDB:
         projectControl = {"_id": self.projectId}
         changes = {"$unset": {"lockedBy": 1, "lockedAt": 1, "patchData": 1},"$set": {"status": self.COMPLETED}}
         status = self.getLock()
-        if status != self.HALTED:
-            raise statusError('Control doc in "{}" state, "{}" expected.',status,self.HALTED)
+        if status != self.RESTARTING:
+            raise statusError('Control doc in "{}" state, "{}" expected.'.format(status,self.RESTARTING))
+        status = self.controlColl.update_one(projectControl,changes)
+        if status.matched_count != 1:
+            raise dbError("endPatch: Control Record was not updated")
+        return 0
+    
+    def endForce(self):
+        projectControl = {"_id": self.projectId}
+        changes = {"$unset": {"lockedBy": 1, "lockedAt": 1, "patchData": 1},"$set": {"status": self.COMPLETED}}
+        status = self.getLock()
+        if status != self.INPROGRESS:
+            raise statusError('Control doc in "{}" state, "{}" expected.'.format(status,self.INPROGRESS))
         status = self.controlColl.update_one(projectControl,changes)
         if status.matched_count != 1:
             raise dbError("endPatch: Control Record was not updated")
@@ -401,7 +425,10 @@ class OpsManager:
         return(response.json())
 
     def doPut(self,method,postData):
-        response = self.OMSession.put(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        if isinstance(postData,dict):
+            response = self.OMSession.put(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        else:
+            response = self.OMSession.put(self.OMRoot+method, data = postData, auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
         if (response.status_code != 200) :
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
@@ -412,7 +439,10 @@ class OpsManager:
         return 0
     
     def doPost(self,method,postData):
-        response = self.OMSession.post(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        if isinstance(postData,dict):
+            response = self.OMSession.post(self.OMRoot+method, data = json.dumps(postData), auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        else:
+            response = self.OMSession.post(self.OMRoot+method, data = postData, auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
         if (response.status_code >= 300) :
             resp = response.json()
             if ("error" in resp) and ("detail" in resp):
@@ -500,7 +530,7 @@ class hostStatus:
         
 class automation:
     
-    def __init__(self,OM,projectId,projectName,db,autoconfig=None):
+    def __init__(self,OM,projectId,projectName,db,autoconfig=None,skipCheck=False):
         self.config = autoconfig
         self.projectId = projectId
         self.projName = projectName
@@ -512,18 +542,20 @@ class automation:
         self.deployTimeout = OM.deployTimeout
         self.prjConfig = db.getProjConfig()
         self.db = db
+        self.newVersion = None # Version of of our updated config
         
         # First check we are at goal state
-        response = self.opsManager.doRequest("/groups/"+projectId+"/automationStatus")
-        self.currentVersion = response["goalVersion"]
-        goalState = True
-        for node in response["processes"]:
-            if node["lastGoalVersionAchieved"] != self.currentVersion:
-                goalState = False
-                break
-        if not goalState:
-            self.config = None 
-            return 
+        if not skipCheck:
+            response = self.opsManager.doRequest("/groups/"+projectId+"/automationStatus")
+            self.currentVersion = response["goalVersion"]
+            goalState = True
+            for node in response["processes"]:
+                if node["lastGoalVersionAchieved"] != self.currentVersion:
+                    goalState = False
+                    break
+            if not goalState:
+                self.config = None 
+                return 
         
         if autoconfig is None:
             self.config = self.opsManager.doRequest("/groups/"+projectId+"/automationConfig")
@@ -623,6 +655,15 @@ class automation:
                 return self.HostNodeMapping[hostname]["mongosName"]
         return None
     
+    def getAllNodes(self,hostname):
+        nodes = []
+        if hostname in self.HostNodeMapping:
+            if "name" in self.HostNodeMapping[hostname]:
+                nodes.append(self.HostNodeMapping[hostname]["name"])
+            if "mongosName" in self.HostNodeMapping[hostname]:
+                nodes.append(self.HostNodeMapping[hostname]["mongosName"])
+        return nodes
+    
     def getProcesses(self):
         return self.config["processes"]
     
@@ -647,6 +688,7 @@ class automation:
     def allGoal(self):
         response = self.opsManager.doRequest("/groups/"+self.projectId+"/automationStatus")
         targetVersion  = response["goalVersion"]
+        self.newVersion = targetVersion
         notAtGoal = 0
         for host in response["processes"]:
             if host["lastGoalVersionAchieved"] != targetVersion:
@@ -750,8 +792,25 @@ class automation:
                 if self.opsManager.doPatch("/groups/"+prjConfig["projectId"]+"/alertConfigs/"+alertId,postEnabled) == None:
                     logger.logWarning("Alert {} could not be found to enable.".format(alertId))
         return 
-                
-    def startMaintainance(self,patchGroup,db,alrtConfig,windowId):
+    
+    def isCandidate(self,nodeInfo,shutdownSpec):
+        if "dc" in shutdownSpec:
+            if ("tags" in nodeInfo) and ("dc" in nodeInfo["tags"]) and (nodeInfo["tags"]["dc"] == shutdownSpec["dc"]):
+                return True 
+        if "patchGroup" in shutdownSpec:
+            if ("tags" in nodeInfo) and ("patchGroup" in nodeInfo["tags"]) and (nodeInfo["tags"]["patchGroup"] == shutdownSpec["patchGroup"]):
+                return True 
+        if "nodeName" in shutdownSpec:
+            node = shutdownSpec["nodeName"]
+            if isinstance(node,list):
+                if (nodeInfo["host"] in node):
+                    return True
+            else:
+                if nodeInfo["host"] == node:
+                    return True 
+        return False 
+    
+    def startMaintainance(self,patchGroup,db,alrtConfig,windowId,isForce=False):
         resetDoc = {}
         newAutomation = self.config
         hostStat = hostStatus(db.projectId,self)
@@ -784,7 +843,7 @@ class automation:
                     isDown = True
                     if member["host"] not in downHosts:
                         downHosts.append(member["host"])
-                if ("tags" in member) and ("patchGroup" in member["tags"]) and (member["tags"]["patchGroup"] == patchGroup):
+                if ("tags" in member) and self.isCandidate(member,patchGroup):
                     inCurrentPg.append(member["host"])
                     pgVotes += member["votes"]
                     if not isDown:
@@ -792,12 +851,12 @@ class automation:
                 members += 1
 
             if len(inCurrentPg) == 0:
-                logger.logWarning("No nodes in Patch Group "+str(patchGroup)+" for replicaset "+replSet["_id"],logDB=True)
+                logger.logWarning("No nodes in Patch Spec "+str(patchGroup)+" for replicaset "+replSet["_id"],logDB=True)
                 continue
             elif (len(inCurrentPg) > 1) and (members >= 5):  # 5 or more nodes shutdown 2 is possible
-                logger.logWarning("Multiple nodes in Patch Group "+str(patchGroup)+" in replicaset "+replSet["_id"]+".",logDB=True)
+                logger.logWarning("Multiple nodes in Patch Spec "+str(patchGroup)+" in replicaset "+replSet["_id"]+".",logDB=True)
             elif len(inCurrentPg) != 1:
-                logger.logWarning("Only 1 node allowed per shard Patch Group, {} configured in patch group {} in replicaset {}." \
+                logger.logWarning("Only 1 node allowed per shard. {} configured in patch spec {} in replicaset {}." \
                                   .format(len(inCurrentPg),str(patchGroup),replSet["_id"]),logDB=True)
                 for shutdownNode in inCurrentPg:
                     shutdownHost = self.getHostname(shutdownNode)
@@ -957,7 +1016,12 @@ class automation:
             if host in activeNodes:
                 activeNodes.remove(host)
                 skippedHosts.append(host)
-        db.startPatch(stopped,activeNodes,origSettings,patchGroup,maintId, disabledAlerts, skippedHosts, originalConfig)
+        if isForce:
+            return False
+        db.startPatch(stopped,activeNodes,origSettings,patchGroup,maintId, disabledAlerts, skippedHosts, originalConfig,failedNodes,self.newVersion)
+        if myName in activeNodes:
+            return True
+        return False
     
     def endMaintainance(self,db):
         newAutomation = self.config
@@ -995,6 +1059,7 @@ class automation:
         self.enableAlerts(maintId, disabledAlerts)
         
         db.endPatch()
+        
         
 class alertConfig:
     def __init__(self,OM,projectId,globalAlrtNames):
@@ -1069,11 +1134,14 @@ def getJSON(dictionary):
         logger.logDebug("Error attempting to create config dump ({}).".format(format(e)))
     return "Error dumping config!"
     
+def fmtDate(dateField):
+    return dateField.astimezone(tz.tzlocal()).strftime("%x %X")
             
     
     
 def getVariables():
-    global publicKey, privateKey, OMServer, myName, OMInternal, OMRoot, DBURI
+    global publicKey, privateKey, OMServer, myName, OMInternal, OMRoot, DBURI,tokenLocation,agentCommand,failsafeLogLocation
+    global cafile
     publicKey = os.getenv("OM_PUBLIC")
     privateKey = os.getenv("OM_PRIVATE")
     OMServer = os.getenv("OM_SERVER")
@@ -1095,6 +1163,12 @@ def getVariables():
     temp = os.getenv("RESTART_AGENT")
     if temp != None:
         agentCommand = temp
+    temp = os.getenv("rootCA")
+    if temp != None:
+        cafile = temp
+    temp = os.getenv("FAILSAFE_LOG")
+    if temp != None:
+        failsafeLogLocation = temp
         
 
  
@@ -1451,8 +1525,9 @@ USAGE
         parser.add_argument('--input', '-i', dest="inFile", metavar='inFile', help="Input Tag Definition")
         parser.add_argument('--logfile', '-l', dest="logFile", metavar='logFile', help="Redirect Messages to a file")
         parser.add_argument('--hostname', dest="host", metavar='host', help="Override the hostname")
+        parser.add_argument('--messages', dest="msgCount", metavar='msgCount', help="Number of messages to display", type=int)
         parser.add_argument('--CA', dest="cacert", metavar='cacert', help="Specify the path to the CA public cert")
-        parser.add_argument('--deployTimeout', dest="deployTO", metavar='deployTimeoutSecs', type=int, nargs=1, help="Time to wait (seconds) for Deploy to complete")
+        parser.add_argument('--deployTimeout', dest="deployTO", metavar='deployTimeoutSecs', type=int,  help="Time to wait (seconds) for Deploy to complete")
         
         feature_parser = parser.add_mutually_exclusive_group(required=True)
         feature_parser.add_argument('--generateTagFile', dest='generate', action='store_true')
@@ -1461,7 +1536,9 @@ USAGE
         feature_parser.add_argument('--finish', dest='end', action='store_true')
         feature_parser.add_argument('--failsafe', dest='failsafe', action='store_true')
         feature_parser.add_argument('--resetProject', dest="resetPrj", action='store_true')
-        feature_parser.add_argument('--status', dest="status", action='store_true')
+        feature_parser.add_argument('--status', dest="status", action="store_true")
+        feature_parser.add_argument('--revert', dest="revert", action='store_true')
+        feature_parser.add_argument('--force', dest="force", action='store', nargs=2)
         
 
 
@@ -1472,6 +1549,8 @@ USAGE
         
         if not args.host is None:
             myName = args.host
+            
+           
         
         if args.debug:
             logLevel = myLogger.DEBUG
@@ -1509,7 +1588,7 @@ USAGE
         endpoint = OpsManager(OMServer,OMInternal,deployTO,cafile)
     
         # load or save tags from anywhere
-        if (args.generate or args.load or args.status or args.resetPrj) and args.project is not None:
+        if (not (args.start or args.end)) and args.project is not None:
             projectInfo = endpoint.doRequest("/groups/byName/"+args.project)
             projectId = projectInfo["id"]
         else:
@@ -1532,20 +1611,21 @@ USAGE
         prjConfig = db.getProjConfig()
         
         if args.status:
+
             prjStatus = db.getStatus()
             logger.setWindow(db.controlDoc["patchWindowNumber"])
             if prjStatus == None:
                 logger.logMessage("No status for project {}.".format(projName))
                 return 1
             if (prjStatus == db.NEW) or (prjStatus == db.COMPLETED):
-                logger.logMessage("No maintainance active for project {}, last run was {}.".format(projName,db.controlDoc["startTime"].strftime("%x %X")))
+                logger.logMessage("No maintainance active for project {}, last run was {}.".format(projName,fmtDate(db.controlDoc["startTime"])))
                 if (logger.INFO >= logger.sevLevel):
                     messages = db.getMessages()
                     numMessages = len(messages)
                     if numMessages > 0:
                         logger.logMessage("Last {} Messages for Project:".format(numMessages))
                         for msg in messages:
-                            logger.logMessage("   {}: {}".format(msg["ts"].strftime("%x %X"),msg["message"]))
+                            logger.logMessage("   {}: {}".format(fmtDate(msg["ts"]),msg["message"]))
             else:
                 patchData = db.controlDoc["patchData"]
                 logger.logMessage("Project {}, current Status: {}, {} Nodes waiting, {} Nodes Active, {} Node Completed, {} Nodes Skipped." \
@@ -1567,13 +1647,16 @@ USAGE
                     logger.logMessage("Hosts skipped:")
                     for host in patchData["skippedHosts"]:
                         logger.logMessage("   {}".format(host))
-                if (logger.INFO >= logger.sevLevel):
-                    messages = db.getMessages(logger.maintWindowId)
+                if (logger.INFO >= logger.sevLevel) or (args.msgCount is not None):
+                    if args.msgCount is not None:
+                        messages = db.getMessages(logger.maintWindowId,Limit=args.msgCount)
+                    else:
+                        messages = db.getMessages(logger.maintWindowId)
                     numMessages = len(messages)
                     if numMessages > 0:
                         logger.logMessage("Last {} Messages for window {}:".format(numMessages,logger.maintWindowId))
                         for msg in messages:
-                            logger.logMessage("   {}: {}".format(msg["ts"].strftime("%x %X"),msg["message"]))
+                            logger.logMessage("   {}: {}".format(fmtDate(msg["ts"]),msg["message"]))
             return 0
                         
         if args.resetPrj:
@@ -1585,24 +1668,30 @@ USAGE
             return 0
             
         alrtCfg = None
+        auto = None
+        
+       
         if prjConfig is not None: 
             alrtCfg = alertConfig(endpoint,projectId,prjConfig["alerts"])
         #
         #use the Project ID to get the automation config
-        auto = automation(endpoint,projectId,projName,db)
-        counter = 0
-        timeout = 300 # Five Minutes: we can't start if an OM deploy is in progress
-        if isinstance(endpoint.deployTimeout,int):
-            timeout = endpoint.deployTimeout    
-            
-        while auto.config is None:  
-            if (counter % 6) == 0:
-                logger.logMessage("Ops Manager changes being deployed by another process, waiting for it to finish.")
-            sleep(10)
-            counter += 1
+        
+        prjStatus = db.getStatus()
+        if not (("deployFailed" in db.controlDoc) and (prjStatus == db.HALTED)):  # Skip fetching config if shutdown failed to deploy 
             auto = automation(endpoint,projectId,projName,db)
-            if counter*10 > timeout:
-                raise fatalError("Timeout trying to fetch OM config")
+            counter = 0
+            timeout = 300 # Five Minutes: we can't start if an OM deploy is in progress
+            if isinstance(endpoint.deployTimeout,int):
+                timeout = endpoint.deployTimeout    
+                
+            while auto.config is None:  
+                if (counter % 6) == 0:
+                    logger.logMessage("Ops Manager changes being deployed by another process, waiting for it to finish.")
+                sleep(10)
+                counter += 1
+                auto = automation(endpoint,projectId,projName,db)
+                if counter*10 > timeout:
+                    raise fatalError("Timeout trying to fetch OM config")
 
         
 
@@ -1651,10 +1740,12 @@ USAGE
         #
         # Tag file options handled we must be starting or stopping
         #
-        patchGroup = auto.getPatchGroup(myName)
-        if patchGroup is None:
-            logger.logWarning("{} is not a member of any patch group",logDB=True)
-            return(1)
+        patchGroup = None 
+        if args.start or args.end:
+            patchGroup = auto.getPatchGroup(myName)
+            if patchGroup is None:
+                logger.logWarning("{} is not a member of any patch group",logDB=True)
+                return(1)
         
 
         prjStatus = db.getLock()
@@ -1670,15 +1761,18 @@ USAGE
                 db.doUnlock(db.INPROGRESS)  # We are first, shutdown the cluster
                 maintWindowId = db.controlDoc["patchWindowNumber"]
                 logger.setWindow(maintWindowId)
-                auto.startMaintainance(patchGroup,db,alrtCfg,maintWindowId)
-                createToken()
-                logger.logMessage("Patch group {} halted. Ok to start patching {}.".format(patchGroup,myName),logDB=True)
+                patchSpec = {"patchGroup": patchGroup}
+                if auto.startMaintainance(patchSpec,db,alrtCfg,maintWindowId):
+                    createToken()
+                    logger.logMessage("Patch group {} halted. Ok to start patching {}.".format(patchGroup,myName),logDB=True)
+                else:
+                    logger.logMessage("Patch group {} halted. Skipping this node {}.".format(patchGroup,myName),logDB=True)
+                    return 1  # Abort patching
             elif prjStatus == db.HALTED: 
                 if db.startNode(myName) == 0:
                     createToken()
                     logger.logMessage("Patching OK for {}".format(myName),logDB=True)
                 else:
-                    logger.logError("Patching aborted")
                     return(1)
                 return(0)
             elif prjStatus == db.RESTARTING: #too late
@@ -1702,6 +1796,9 @@ USAGE
                         os.system(agentCommand)
                 deleteToken()
                 if db.allDone(myName):
+                    db.doUnlock(db.RESTARTING)
+                    if auto == None:
+                        auto = automation(endpoint,projectId,projName,db,skipCheck=True)
                     auto.endMaintainance(db) 
                 else:
                     if not db.endNode(myName):
@@ -1711,8 +1808,10 @@ USAGE
                 # restarts the cluster if nodes haven't been patched
                 #
                 if len(db.controlDoc["patchData"]["completedHosts"]) == 0:  # We are first to finish
-                    tf = tempfile.NamedTemporaryFile("w",delete=False,suffix=".failsafe.log")
-                    tfName = tf.name
+                    if os.path.isdir(failsafeLogLocation):
+                        tfName = failsafeLogLocation+"/"+projName+"."+datetime.now().strftime("%Y%m%d-%H%M%S")+"failsafe.log"
+                    else:
+                        tfName = failsafeLogLocation
                     pid = os.spawnl(os.P_NOWAIT, sys.argv[0], sys.argv[0],'--failsafe','--logfile',tfName,'--hostname', myName)
                     logger.logMessage("Patching complete. Failsafe started on {} as PID {} with logs in {}."\
                                       .format(myRealName,str(pid),tfName),logDB=True) 
@@ -1728,6 +1827,41 @@ USAGE
                 logger.logWarning("Unexpected status {} for project {} while finishing maintainance on {}." \
                                   .format(prjStatus,projName,myName),logDB=True)
                 return(1)
+        elif args.revert:
+            db.doUnlock(db.RESTARTING)
+            if ("originalConfig" in db.controlDoc) and (db.controlDoc["originalConfig"] != None):
+                nodesFailed = auto.deployChanges(db.controlDoc["originalConfig"])
+                if len(nodesFailed)== 0:
+                    logger.logMessage("Project Configuration reverted",logDB=True)
+                    db.endPatch()
+                    return 0
+                logger.logError("Revert Configuration failed on hosts {}!".format(nodesFailed), logDB=True)
+            else:
+                logger.logMessage("No saved config to revert!")
+            return 1
+        elif args.force is not None:
+            mode = args.force[0]
+            objectName = args.force[1]
+            patchspec = {}
+            if mode == "host":
+                nodes = auto.getAllNodes(objectName)
+                if len(nodes) == 0:
+                    logger.logError("No Mongo processes found for {}.".format(objectName))
+                    return(1)
+                patchSpec = {"nodeName": nodes}
+            elif mode == "dc":
+                patchspec = {"dc": objectName}
+            else:
+                logger.logError("Invalid force option {}.".format(mode))
+                db.doUnlock()
+                return 1
+            db.doUnlock(db.INPROGRESS)
+            if auto.startMaintainance(patchspec,db,alrtCfg,maintWindowId,isForce=True):
+                logger.logMessage("Sucessfully shutdown {}".format(patchspec))
+                
+            else:
+                logger.logError("Failed to apply patchspec {}".format(patchspec))
+            db.endForce()
         else:  # failsafe daemon
             db.doUnlock()
             if not (prjStatus == db.HALTED): # Not in Maintainance Mode so nothing to do
