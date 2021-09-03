@@ -33,15 +33,13 @@ from bson.codec_options import CodecOptions
 from time import sleep
 from platform import node
 import tzlocal
-import tempfile
 import re
 import math 
 import urllib3
 from dateutil import tz
 from dns.rdataclass import NONE
-import argparse
-from pickle import TRUE, FALSE
-from cffi.api import basestring
+
+
 
 
 
@@ -52,9 +50,9 @@ from cffi.api import basestring
 
 
 __all__ = []
-__version__ = 0.2
-__date__ = '2021-02-26'
-__updated__ = '2021-02-26'
+__version__ = 0.3
+__date__ = '2021-02-06'
+__updated__ = '2021-07-14'
 
 # Global variables set from the environment
 
@@ -70,6 +68,36 @@ agentCommand = None
 logger = None
 validID = re.compile("^[a-fA-F0-9]{24}$")
 alertTypeNames = ["HOST", "REPLICA_SET", "CLUSTER", "AGENT", "BACKUP"]
+alertEventNames = {
+"AUTOMATION_AGENT_DOWN": "Automation is down","AUTOMATION_AGENT_UP": "Automation is up",
+"BACKUP_AGENT_CONF_CALL_FAILURE": "Backup has too many conf call failures","BACKUP_AGENT_DOWN": "Backup is down","BACKUP_AGENT_UP": "Backup is up","BACKUP_AGENT_VERSION_BEHIND": "Backup does not have the latest version","BACKUP_AGENT_VERSION_CURRENT": "Backup has the latest version",
+"MONITORING_AGENT_DOWN": "Monitoring is down","MONITORING_AGENT_UP": "Monitoring is up","MONITORING_AGENT_VERSION_BEHIND": "Monitoring does not have the latest version","MONITORING_AGENT_VERSION_CURRENT": "Monitoring has the latest version",
+"NEW_AGENT": "New agent","AUTOMATION_CONFIG_PUBLISHED_AUDIT": "Deployment configuration published","BAD_CLUSTERSHOTS": "Backup has possibly inconsistent cluster snapshots","CLUSTER_BLACKLIST_UPDATED_AUDIT": "Excluded namespaces were modified for cluster",
+"CLUSTER_CHECKKPOINT_UPDATED_AUDIT": "Checkpoint interval updated for cluster","CLUSTER_CREDENTIAL_UPDATED_AUDIT": "Backup authentication credentials updated for cluster","CLUSTER_SNAPSHOT_SCHEDULE_UPDATED_AUDIT": "Snapshot schedule updated for cluster",
+"CLUSTER_STATE_CHANGED_AUDIT": "Cluster backup state is now","CLUSTER_STORAGE_ENGINE_UPDATED_AUDIT": "Cluster storage engine has been updated","CLUSTERSHOT_DELETED_AUDIT": "Cluster snapshot has been deleted","CLUSTERSHOT_EXPIRY_UPDATED_AUDIT": "Clustershot expiry has been updated.",
+"CONSISTENT_BACKUP_CONFIGURATION": "Backup configuration is consistent","GOOD_CLUSTERSHOT": "Backup has a good clustershot","INCONSISTENT_BACKUP_CONFIGURATION": "Inconsistent backup configuration has been detected","INITIAL_SYNC_FINISHED_AUDIT": "Backup initial sync finished",
+"INITIAL_SYNC_STARTED_AUDIT": "Backup initial sync started","OPLOG_BEHIND": "Backup oplog is behind","OPLOG_CURRENT": "Backup oplog is current","RESTORE_REQUESTED_AUDIT": "A restore has been requested","RESYNC_PERFORMED": "Backup has been resynced","RESYNC_REQUIRED": "Backup requires a resync",
+"RS_BLACKLIST_UPDATED_AUDIT": "Excluded namespaces were modified for replica set","RS_CREDENTIAL_UPDATED_AUDIT": "Backup authentication credentials updated for replica set","RS_ROTATE_MASTER_KEY_AUDIT": "A master key rotation has been requested for a replica set.",
+"RS_SNAPSHOT_SCHEDULE_UPDATED_AUDIT": "Snapshot schedule updated for replica set","RS_STATE_CHANGED_AUDIT": "Replica set backup state is now","RS_STORAGE_ENGINE_UPDATED_AUDIT": "Replica set storage engine has been updated","SNAPSHOT_DELETED_AUDIT": "Snapshot has been deleted",
+"SNAPSHOT_EXPIRY_UPDATED_AUDIT": "Snapshot expiry has been updated.","SYNC_PENDING_AUDIT": "Backup sync is pending","SYNC_REQUIRED_AUDIT": "Backup sync has been initiated","BI_CONNECTOR_DOWN": "BI Connector is down","BI_CONNECTOR_UP": "BI Connector is up",
+"CLUSTER_MONGOS_IS_MISSING": "Cluster is missing an active mongos","CLUSTER_MONGOS_IS_PRESENT": "Cluster has an active mongos","SHARD_ADDED": "Shard added","SHARD_REMOVED": "Shard removed","DATA_EXPLORER": "User performed a Data Explorer read-only operation",
+"DATA_EXPLORER_CRUD": "User performed a Data Explorer CRUD operation, which modifies data","ADD_HOST_AUDIT": "Host added","ADD_HOST_TO_REPLICA_SET_AUDIT": "Host added to replica set","ATTEMPT_KILLOP_AUDIT": "Attempted to kill operation",
+"ATTEMPT_KILLSESSION_AUDIT": "Attempted to kill session","DB_PROFILER_DISABLE_AUDIT": "Database profiling disabled","DB_PROFILER_ENABLE_AUDIT": "Database profiling enabled","DELETE_HOST_AUDIT": "Host removed","DISABLE_HOST_AUDIT": "Host disabled",
+"HIDE_AND_DISABLE_HOST_AUDIT": "Host disabled and hidden","HIDE_HOST_AUDIT": "Host hidden","HOST_DOWN": "Host is down","HOST_DOWNGRADED": "Host has been downgraded","HOST_IP_CHANGED_AUDIT": "Host IP address changed","HOST_NOW_PRIMARY": "Host is now primary",
+"HOST_NOW_SECONDARY": "Host is now secondary","HOST_NOW_STANDALONE": "Host is now a standalone","HOST_RECOVERED": "Host has recovered","HOST_RECOVERING": "Host is recovering","HOST_RESTARTED": "Host has restarted","HOST_ROLLBACK": "Host experienced a rollback",
+"HOST_SSL_CERTIFICATE_CURRENT": "Host’s SSL certificate is current","HOST_SSL_CERTIFICATE_STALE": "Host’s SSL certificate will expire within 30 days","HOST_UP": "Host is up","HOST_UPGRADED": "Host has been upgraded","INSIDE_METRIC_THRESHOLD": "Inside metric threshold","NEW_HOST": "Host is new",
+"OUTSIDE_METRIC_THRESHOLD": "Outside metric threshold","PAUSE_HOST_AUDIT": "Host paused","REMOVE_HOST_FROM_REPLICA_SET_AUDIT": "Host removed from replica set","RESUME_HOST_AUDIT": "Host resumed","UNDELETE_HOST_AUDIT": "Host undeleted","VERSION_BEHIND": "Host does not have the latest version",
+"VERSION_CHANGED": "Host version changed","VERSION_CURRENT": "Host has the latest version","ALL_ORG_USERS_HAVE_MFA": "Organization users have two-factor authentication enabled","ORG_API_KEY_ADDED": "API key has been added","ORG_API_KEY_DELETED": "API key has been deleted",
+"ORG_EMPLOYEE_ACCESS_RESTRICTED": "MongoDB Production Support Employees restricted from accessing Atlas backend infrastructure for any Atlas cluster in this organization (You may grant a 24 hour bypass to the access restriction at the Atlas cluster level)",
+"ORG_EMPLOYEE_ACCESS_UNRESTRICTED": "MongoDB Production Support Employees unrestricted from accessing Atlas backend infrastructure for any Atlas cluster in this organization","ORG_PUBLIC_API_WHITELIST_NOT_REQUIRED": "IP Whitelist for Public API Not Required",
+"ORG_PUBLIC_API_WHITELIST_REQUIRED": "Require IP Whitelist for Public API Enabled","ORG_RENAMED": "Organization has been renamed","ORG_TWO_FACTOR_AUTH_OPTIONAL": "Two-factor Authentication Optional","ORG_TWO_FACTOR_AUTH_REQUIRED": "Two-factor Authentication Required",
+"ORG_USERS_WITHOUT_MFA": "Organization users do not have two-factor authentication enabled","ALL_USERS_HAVE_MULTIFACTOR_AUTH": "Users have two-factor authentication enabled","USERS_WITHOUT_MULTIFACTOR_AUTH": "Users do not have two-factor authentication enabled",
+"CONFIGURATION_CHANGED": "Replica set has an updated configuration","ENOUGH_HEALTHY_MEMBERS": "Replica set has enough healthy members","MEMBER_ADDED": "Replica set member added","MEMBER_REMOVED": "Replica set member removed","MULTIPLE_PRIMARIES": "Replica set elected multiple primaries",
+"NO_PRIMARY": "Replica set has no primary","ONE_PRIMARY": "Replica set elected one primary","PRIMARY_ELECTED": "Replica set elected a new primary","TOO_FEW_HEALTHY_MEMBERS": "Replica set has too few healthy members","TOO_MANY_ELECTIONS": "Replica set has too many election events",
+"TOO_MANY_UNHEALTHY_MEMBERS": "Replica set has too many unhealthy members","TEAM_ADDED_TO_GROUP": "Team added to project","TEAM_CREATED": "Team created","TEAM_DELETED": "Team deleted","TEAM_NAME_CHANGED": "Team name changed","TEAM_REMOVED_FROM_GROUP": "Team removed from project",
+"TEAM_ROLES_MODIFIED": "Team roles modified in project","TEAM_UPDATED": "Team updated","USER_ADDED_TO_TEAM": "User added to team","INVITED_TO_GROUP": "User was invited to project","INVITED_TO_ORG": "User was invited to organization",
+"JOIN_GROUP_REQUEST_APPROVED_AUDIT": "Request to join project was approved","JOIN_GROUP_REQUEST_DENIED_AUDIT": "Request to join project was denied","JOINED_GROUP": "User joined the project","JOINED_ORG": "User joined the organization","JOINED_TEAM": "User joined the team",
+"REMOVED_FROM_GROUP": "User left the project","REMOVED_FROM_ORG": "User left the organization","REMOVED_FROM_TEAM": "User left the team","REQUESTED_TO_JOIN_GROUP": "User requested to join project","USER_ROLES_CHANGED_AUDIT": "User had their role changed"}
 
 
 myRealName = socket.gethostname()
@@ -328,10 +356,12 @@ class cntrlDB:
             messages.append(msg)
         return messages
     
-    def addSavedOMConfig(self,config,saveType,comment,OMversion):
+    def addSavedOMConfig(self,config,saveType,comment,OMversion,alertState=None):
         now = datetime.now(timezone.utc)
         configHistDoc = {"projectId": self.projectId, "ProjectName":  self.projName, "saveDT": now, "comment": comment, \
                          "configDoc": config, "version": OMversion, "saveType": saveType}
+        if alertState != None:
+            configHistDoc["alertStates"] = alertState
         try:
             status = self.configHistoryColl.insert_one(configHistDoc)
         except pymongo.errors.DuplicateKeyError:
@@ -349,10 +379,14 @@ class cntrlDB:
     def getSavedConfig(self,version):
         filterSpec = {"projectId": self.projectId, "version": version}
         historyDoc = self.configHistoryColl.find_one(filterSpec)
+        alertState = None 
+        if "alertStates" in historyDoc:
+            alertState = historyDoc["alertStates"]
         if "configDoc" in historyDoc:
-            return historyDoc["configDoc"]
+            return historyDoc["configDoc"],alertState
         else:
-            raise None
+            return None,None
+        
     def getConfigHistory(self,earliest=90):
         now = datetime.now(timezone.utc)
         startDT = now - timedelta(days =earliest) # Default go back 3 months
@@ -517,6 +551,19 @@ class OpsManager:
                 raise fatalError("Error OM request - "+str(response.status_code)+": "+OMRoot+method)
         logger.logDebug(self.OMRoot+method)
         return response.json()
+    
+    def doDelete(self,method):
+        response = self.OMSession.delete(self.OMRoot+method, auth=HTTPDigestAuth(publicKey, privateKey), headers= {"Content-Type": "application/json"})
+        if (response.status_code == 404):
+            return None
+        elif (response.status_code != 204) :
+            resp = response.json()
+            if ("error" in resp) and ("detail" in resp):
+                raise fatalError(self.OMRoot+method+": "+str(resp["error"])+": ",resp["detail"])
+            else:
+                raise fatalError("Error OM request - "+str(response.status_code)+": "+OMRoot+method)
+        logger.logDebug(self.OMRoot+method)
+        return 0
     
     def followLink(self,url):
         if self.internalName is None:
@@ -834,10 +881,7 @@ class automation:
         #
         prjConfig = self.prjConfig
         if maintId != None:
-            now = datetime.now(timezone.utc)
-            endIso = now.isoformat()
-            maintData = {"endDate": endIso }
-            maintId = self.opsManager.doPatch("/groups/"+prjConfig["projectId"]+"/maintenanceWindows/"+maintId,maintData)
+            maintId = self.opsManager.doDelete("/groups/"+prjConfig["projectId"]+"/maintenanceWindows/"+maintId)
         #
         # Disable Specific Alerts
         #
@@ -845,6 +889,16 @@ class automation:
             postEnabled = {"enabled": True}
             for alertId in alerts:
                 if self.opsManager.doPatch("/groups/"+prjConfig["projectId"]+"/alertConfigs/"+alertId,postEnabled) == None:
+                    logger.logWarning("Alert {} could not be found to enable.".format(alertId))
+        return 
+    
+    def resetAlerts(self,alertStates):
+        response = self.opsManager.doRequest("/groups/"+self.projectId+"/alertConfigs")
+        for alert in response["results"]:
+            alertId = alert["id"]
+            if (alertId in alertStates) and (alertStates[alertId] != alert["enabled"]):
+                postEnabled = {"enabled": alertStates[alertId]}
+                if self.opsManager.doPatch("/groups/"+self.projectId+"/alertConfigs/"+alertId,postEnabled) == None:
                     logger.logWarning("Alert {} could not be found to enable.".format(alertId))
         return 
     
@@ -865,7 +919,7 @@ class automation:
                     return True 
         return False 
     
-    def startMaintainance(self,patchGroup,db,alrtConfig,comment,isForce=False):
+    def startMaintainance(self,patchSpec,db,alrtConfig,comment,isForce=False):
         resetDoc = {}
         newAutomation = self.config
         hostStat = hostStatus(db.projectId,self)
@@ -874,7 +928,7 @@ class automation:
             shutdownReason = db.FORCE 
         
 
-        originalConfig = db.addSavedOMConfig(newAutomation,shutdownReason,comment,newAutomation["version"])
+        originalConfig = db.addSavedOMConfig(newAutomation,shutdownReason,comment,newAutomation["version"],alrtConfig.alertStates)
         
         stopped = []  # Node will be stopped
         activeNodes = [] # Stopping myself so I will move straight to active
@@ -902,7 +956,7 @@ class automation:
                     isDown = True
                     if member["host"] not in downHosts:
                         downHosts.append(member["host"])
-                if ("tags" in member) and self.isCandidate(member,patchGroup):
+                if ("tags" in member) and self.isCandidate(member,patchSpec):
                     inCurrentPg.append(member["host"])
                     pgVotes += member["votes"]
                     if not isDown:
@@ -910,13 +964,13 @@ class automation:
                 members += 1
 
             if len(inCurrentPg) == 0:
-                logger.logWarning("No nodes in Patch Spec "+str(patchGroup)+" for replicaset "+replSet["_id"],logDB=True)
+                logger.logWarning("No nodes in Patch Spec "+str(patchSpec)+" for replicaset "+replSet["_id"],logDB=True)
                 continue
             elif (len(inCurrentPg) > 1) and (members >= 5):  # 5 or more nodes shutdown 2 is possible
-                logger.logWarning("Multiple nodes in Patch Spec "+str(patchGroup)+" in replicaset "+replSet["_id"]+".",logDB=True)
+                logger.logWarning("Multiple nodes in Patch Spec "+str(patchSpec)+" in replicaset "+replSet["_id"]+".",logDB=True)
             elif len(inCurrentPg) != 1:
                 logger.logWarning("Only 1 node allowed per shard. {} configured in patch spec {} in replicaset {}." \
-                                  .format(len(inCurrentPg),str(patchGroup),replSet["_id"]),logDB=True)
+                                  .format(len(inCurrentPg),str(patchSpec),replSet["_id"]),logDB=True)
                 for shutdownNode in inCurrentPg:
                     shutdownHost = self.getHostname(shutdownNode)
                     if shutdownHost not in skippedHosts:
@@ -950,7 +1004,7 @@ class automation:
             #
             elif members == 4:
                 if len(inCurrentPg) != 1:
-                    logger.logWarning("Must exactly 1  Patch Group "+str(patchGroup)+" in replicaset "+replSet["_id"]+".",logDB=True)
+                    logger.logWarning("Multiple hosts in Patch Group: "+str(patchSpec)+". Replicaset: "+replSet["_id"]+".",logDB=True)
                 shutdownNode = inCurrentPg[0]
                 shutdownHost = self.getHostname(shutdownNode)
                 if ((active == 4) and self.gotMajority(totalVotes,arbiter,activeVotes,hidden)) or \
@@ -1005,9 +1059,8 @@ class automation:
             else:
                 clusterCounts = {"total": 0, "active": 0, "inPatchGroup": []}
                 shardedClusters[cluster] = clusterCounts
-            if ("tags" in node) and ('patchGroup' in node["tags"]):
-                if node["tags"]["patchGroup"] == patchGroup:
-                    clusterCounts["inPatchGroup"].append(nodeName)
+            if self.isCandidate(node,patchSpec):
+                clusterCounts["inPatchGroup"].append(nodeName)
             clusterCounts["total"] += 1
             pIdx = self.getNodeProcIdx(nodeName)
             if newAutomation["processes"][pIdx]["disabled"] == False and hostStat.hostUp(hostName):
@@ -1078,7 +1131,7 @@ class automation:
         if isForce:
             db.startForce(failedNodes,originalConfig)
             return True
-        db.startPatch(stopped,activeNodes,origSettings,patchGroup,maintId, disabledAlerts, skippedHosts, originalConfig,failedNodes,self.newVersion)
+        db.startPatch(stopped,activeNodes,origSettings,patchSpec,maintId, disabledAlerts, skippedHosts, originalConfig,failedNodes,self.newVersion)
         if myName in activeNodes:
             return True
         return False
@@ -1131,7 +1184,7 @@ class automation:
         
         for replSet in self.config["replicaSets"]:
             if len(replSet["members"]) == 4: # only applies to replica sets with 4 nodes
-                members = active = voting = hidden = totalVotes = arbiter = activeVotes = 0
+                active = voting = hidden = totalVotes = arbiter = activeVotes = 0
                 hiddenNodes = []
                 downNodes = []
                 for member in replSet["members"]:
@@ -1212,13 +1265,15 @@ class alertConfig:
         self.alertsByHost = {}
         self.globalAlerts = []
         self.activeAlertTypes = []
+        self.alertStates = {}
         response = OM.doRequest("/groups/"+self.projectId+"/alertConfigs")
         for alert in response["results"]:
+            self.alertStates[alert["id"]] = alert["enabled"]
             if len(alert["matchers"]) > 0:
                 for match in alert["matchers"]:
                     host = None
                     if match["fieldName"] == "HOSTNAME":
-                        if match['operator'] == "EQUALS":
+                        if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):
                             host = match["value"]
                             alertId = alert["id"]
                         else:
@@ -1242,6 +1297,8 @@ class alertConfig:
                         else:
                             self.alertsByHost[host] = [alertId]
             if alert["eventTypeName"] in globalAlrtNames:
+                self.globalAlerts.append(alert["id"])
+            if alert["id"] in globalAlrtNames:
                 self.globalAlerts.append(alert["id"])
             if alert["eventTypeName"] not in self.activeAlertTypes:
                 self.activeAlertTypes.append(alert["eventTypeName"])
@@ -1485,9 +1542,20 @@ def setTags(auto,tagDoc,projectInfo,db,om,alertInfo):
     validAlerts = []
     if "alerts" in tagDoc:
         for alert in tagDoc["alerts"]:
-            if isinstance(alertInfo.activeAlertTypes,list) and isinstance(alert, str) and (alert not in alertInfo.activeAlertTypes):
-                logger.logWarning('No Alerts of type "{}" used in the project.'.format(alert))
-            validAlerts.append(alert)
+            if validID.match(alert) != None:
+                if isinstance(alertInfo.alertStates,dict) and isinstance(alert, str) and (alert not in alertInfo.alertStates):
+                    logger.logError("Alert ID {} is not present in the project, Ignoring".format(alert))
+                else:
+                    validAlerts.append(alert)
+            else:
+                if isinstance(alertInfo.activeAlertTypes,list) and isinstance(alert, str) and (alert not in alertInfo.activeAlertTypes):
+                    if alert not in alertEventNames:
+                        logger.logError("Alert type {} not recognized. Ignoring".format(alert))
+                    else:
+                        logger.logWarning('No Alerts of type "{}" used in the project.'.format(alert))
+                        validAlerts.append(alert)
+                else:
+                    validAlerts.append(alert)
 
         if ((not "alerts" in projectCfg) and (len(validAlerts) > 0)) or (validAlerts != projectCfg['alerts']):
             projectCfg['alerts'] =validAlerts
@@ -1682,13 +1750,13 @@ USAGE
         feature_parser.add_argument('--loadTagFile', dest='load', action='store_true')
         feature_parser.add_argument('--start', dest='start', action='store_true')
         feature_parser.add_argument('--finish', dest='end', action='store_true')
-        feature_parser.add_argument('--failsafe', dest='failsafe', action='store_true')
+        feature_parser.add_argument('--failsafe', dest='failsafe', metavar="delay", nargs="?", type=int, const=240)
         feature_parser.add_argument('--resetProject', dest="resetPrj", action='store_true')
         feature_parser.add_argument('--status', dest="status", action="store_true")
         feature_parser.add_argument('--revert', dest="revert", metavar="version", nargs=1, type=int)
         feature_parser.add_argument('--extractConfig', dest="extract", metavar=("version","filename"), nargs=2)
         feature_parser.add_argument('--saveConfig', dest="saveConfig", action='store_true')
-        feature_parser.add_argument('--configHistory', dest="cfgHist", metavar="days", type=int)
+        feature_parser.add_argument('--configHistory', dest="cfgHist", metavar="days", nargs="?", type=int, const=90)
         feature_parser.add_argument('--force', dest="force", metavar= ("mode", "name"), action='store', nargs="+")
         
 
@@ -1779,7 +1847,7 @@ USAGE
                         logger.logMessage("Last {} Messages for Project:".format(numMessages))
                         for msg in messages:
                             logger.logMessage("   {}: {}".format(fmtDate(msg["ts"]),msg["message"]))
-            else:
+            elif prjStatus == db.HALTED:
                 patchData = db.controlDoc["patchData"]
                 logger.logMessage("Project {}, current Status: {}, {} Nodes waiting, {} Nodes Active, {} Node Completed, {} Nodes Skipped." \
                                   .format(projName,prjStatus,len(patchData["validatedHosts"]),len(patchData["activeHosts"]), \
@@ -1810,6 +1878,8 @@ USAGE
                         logger.logMessage("Last {} Messages for window {}:".format(numMessages,logger.maintWindowId))
                         for msg in messages:
                             logger.logMessage("   {}: {}".format(fmtDate(msg["ts"]),msg["message"]))
+            else:
+                logger.logMessage("Project {}, current Status: {}".format(projName,prjStatus))
             return 0
                         
         if args.resetPrj:
@@ -1830,8 +1900,11 @@ USAGE
         #use the Project ID to get the automation config
         
         prjStatus = db.getStatus()
-        skpCheck = (("deployFailed" in db.controlDoc) and \
-                ((prjStatus == db.HALTED) or (prjStatus == db.FORCEMODE)))  # Skip fetching config if shutdown failed to deploy 
+        if prjStatus == None: # Brand new project
+            skpCheck = False   # so we need the automation config
+        else:
+            skpCheck = (("deployFailed" in db.controlDoc) and \
+                    ((prjStatus == db.HALTED) or (prjStatus == db.FORCEMODE)))  # Skip fetching config if shutdown failed to deploy 
         auto = automation(endpoint,projectId,projName,db,skipCheck=skpCheck)
         counter = 0
         timeout = 300 # Five Minutes: we can't start if an OM deploy is in progress
@@ -1991,10 +2064,11 @@ USAGE
                                   .format(prjStatus,projName,myName),logDB=True)
                 return(1)
         elif args.revert is not None:
-            config = db.getSavedConfig(args.revert[0])
+            config,alertStates = db.getSavedConfig(args.revert[0])
             if (config != None):
                 db.doUnlock(db.RESTARTING)
                 nodesFailed = auto.deployChanges(config)
+                auto.resetAlerts(alertStates)
                 if len(nodesFailed)== 0:
                     logger.logMessage("Project Configuration reverted",logDB=True)
                     db.endPatch()
@@ -2011,7 +2085,7 @@ USAGE
             except Exception as e:
                 logger.logError('Argument "{}" could not be converted to Integer.'.format(args.extract[0]))
                 return 1
-            config = db.getSavedConfig(cfgVer)
+            config,_ = db.getSavedConfig(cfgVer)
             if (config != None):
                 db.doUnlock()
                 dumpJSON(config, args.extract[1], always=True)
@@ -2022,7 +2096,7 @@ USAGE
                 logger.logMessage("Config version {} not found!".format(args.extract))
                 return 1
         elif args.force is not None:
-            if not isinstance(args.comment,basestring):
+            if not isinstance(args.comment,str):
                 logger.logError("A comment is required for --force")
                 db.doUnlock()
                 return 1    
@@ -2075,27 +2149,30 @@ USAGE
             if args.comment is None:
                 logger.logError("A comment is required when saving the project Configuration")
                 return 1
-            db.addSavedOMConfig(auto.config, db.REQUEST, args.comment.strip("'"), auto.config["version"])
+            db.addSavedOMConfig(auto.config, db.REQUEST, args.comment.strip("'"), auto.config["version"],alrtCfg.alertStates)
             return 0
-        else:  # failsafe daemon
+        elif args.failsafe is not None:  # failsafe daemon
             db.doUnlock()
             if not (prjStatus == db.HALTED): # Not in Maintainance Mode so nothing to do
                 logger.logMessage("Status is "+prjStatus+" so nothing to do")
                 return(0)
-            timeSoFar = datetime.now(timezone.utc) - db.controlDoc["startTime"]
-            secsToSleep = timedelta(hours=4).seconds - timeSoFar.seconds  
-            #secsToSleep = timedelta(minutes=2).seconds - timeSoFar.seconds 
-            wakeTimeUTC = datetime.now(timezone.utc) + timedelta(seconds=secsToSleep)
-            wakeTime = wakeTimeUTC.astimezone(tzlocal.get_localzone())
-            if secsToSleep > 0:
-                logger.logMessage("Sleeping until {}...".format(wakeTime))
-                logger.file.flush()
-                sleep(secsToSleep)
-            prjStatus = db.getLock()
+            if args.failsafe > 0:
+                timeSoFar = datetime.now(timezone.utc) - db.controlDoc["startTime"]
+                secsToSleep = timedelta(minutes=args.failsafe).seconds - timeSoFar.seconds  
+                #secsToSleep = timedelta(minutes=2).seconds - timeSoFar.seconds 
+                wakeTimeUTC = datetime.now(timezone.utc) + timedelta(seconds=secsToSleep)
+                wakeTime = wakeTimeUTC.astimezone(tzlocal.get_localzone())
+                if secsToSleep > 0:
+                    logger.logMessage("Sleeping until {}...".format(wakeTime))
+                    logger.file.flush()
+                    sleep(secsToSleep)
+                prjStatus = db.getLock()
             if prjStatus == db.HALTED:
+                db.doUnlock(db.RESTARTING)
                 auto.endMaintainance(db)
                 logger.logMessage("Failsafe Triggered",logDB=True)
             else:
+                db.doUnlock()
                 logger.logMessage("Nothing to do")
             return(0)    
             
