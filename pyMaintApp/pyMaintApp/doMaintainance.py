@@ -577,8 +577,15 @@ class OpsManager:
                 raise fatalError(request_url+": "+str(resp["error"])+": ",resp["detail"])
             else:
                 raise fatalError("Error OM request - "+str(response.status_code)+": "+request_url)
-        logger.logDebug(url.replace(request_url))
+        logger.logDebug(request_url)
         return(response.json())
+    
+    def getNextPage(self,previous):
+        if ("links" in previous):
+            for link in previous["links"]:
+                if ("rel" in link) and (link["rel"] == "next"):
+                    return self.followLink(link["href"])
+        return None
             
     def findHost(self,hostName,projectID=None):
         myProjects = []
@@ -1267,41 +1274,43 @@ class alertConfig:
         self.activeAlertTypes = []
         self.alertStates = {}
         response = OM.doRequest("/groups/"+self.projectId+"/alertConfigs")
-        for alert in response["results"]:
-            self.alertStates[alert["id"]] = alert["enabled"]
-            if len(alert["matchers"]) > 0:
-                for match in alert["matchers"]:
-                    host = None
-                    if match["fieldName"] == "HOSTNAME":
-                        if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):
-                            host = match["value"]
-                            alertId = alert["id"]
+        while response != None:
+            for alert in response["results"]:
+                self.alertStates[alert["id"]] = alert["enabled"]
+                if len(alert["matchers"]) > 0:
+                    for match in alert["matchers"]:
+                        host = None
+                        if match["fieldName"] == "HOSTNAME":
+                            if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):
+                                host = match["value"]
+                                alertId = alert["id"]
+                            else:
+                                logger.logInfo("Unexpected match operator {} alert {}"\
+                                                  .format(match["operator"],alert["id"]))
+                        elif match["fieldName"] == "HOSTNAME_AND_PORT":
+                            if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):  # Matches being used with a literal
+                                components = match["value"].split(":")
+                                host = components[0]
+                                alertId = alert["id"]
+                            else:
+                                logger.logInfo("Unexpected match operator {} alert {}"\
+                                                  .format(match["operator"],alert["id"]))
                         else:
-                            logger.logInfo("Unexpected match operator {} alert {}"\
-                                              .format(match["operator"],alert["id"]))
-                    elif match["fieldName"] == "HOSTNAME_AND_PORT":
-                        if (match['operator'] == "EQUALS") or (match['operator'] == "REGEX"):  # Matches being used with a literal
-                            components = match["value"].split(":")
-                            host = components[0]
-                            alertId = alert["id"]
-                        else:
-                            logger.logInfo("Unexpected match operator {} alert {}"\
-                                              .format(match["operator"],alert["id"]))
-                    else:
-                        logger.logInfo("Unexpected match field Name {} alert {}"\
-                                          .format(match["fieldName"],alert["id"]))
-#                    print("Found Alert {} for host {}.".format(alertId,host))
-                    if not host == None:
-                        if host in self.alertsByHost:
-                            self.alertsByHost[host].append(alertId)
-                        else:
-                            self.alertsByHost[host] = [alertId]
-            if alert["eventTypeName"] in globalAlrtNames:
-                self.globalAlerts.append(alert["id"])
-            if alert["id"] in globalAlrtNames:
-                self.globalAlerts.append(alert["id"])
-            if alert["eventTypeName"] not in self.activeAlertTypes:
-                self.activeAlertTypes.append(alert["eventTypeName"])
+                            logger.logInfo("Unexpected match field Name {} alert {}"\
+                                              .format(match["fieldName"],alert["id"]))
+    #                    print("Found Alert {} for host {}.".format(alertId,host))
+                        if not host == None:
+                            if host in self.alertsByHost:
+                                self.alertsByHost[host].append(alertId)
+                            else:
+                                self.alertsByHost[host] = [alertId]
+                if alert["eventTypeName"] in globalAlrtNames:
+                    self.globalAlerts.append(alert["id"])
+                if alert["id"] in globalAlrtNames:
+                    self.globalAlerts.append(alert["id"])
+                if alert["eventTypeName"] not in self.activeAlertTypes:
+                    self.activeAlertTypes.append(alert["eventTypeName"])
+            response = OM.getNextPage(response)
         return 
     
     def getAlertsForHost(self,host):
