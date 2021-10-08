@@ -37,7 +37,7 @@ import re
 import math 
 import urllib3
 from dateutil import tz
-from dns.rdataclass import NONE
+
 
 
 
@@ -65,6 +65,7 @@ DBURI = "mongodb://localhost:27017"
 tokenLocation = "/tmp/MONGODB_MAINTAINANCE_IN_PROGRESS"
 failsafeLogLocation = "/tmp"
 agentCommand = None
+cafile = True 
 logger = None
 validID = re.compile("^[a-fA-F0-9]{24}$")
 alertTypeNames = ["HOST", "REPLICA_SET", "CLUSTER", "AGENT", "BACKUP"]
@@ -650,6 +651,8 @@ class automation:
         self.prjConfig = db.getProjConfig()
         self.db = db
         self.newVersion = None # Version of of our updated config
+        self.dcnames = []
+        self.patchgroups = [] 
         
         # First check we are at goal state
         if not skipCheck:
@@ -674,6 +677,13 @@ class automation:
                 hostLoc = {"replSet": rIdx, "node": nIdx}
                 self.configIDX[replset["_id"]+":"+node["host"]] =  hostLoc
                 if "tags" in node:
+                    myTags = node["tags"]
+                    if "dc" in myTags:
+                        if myTags["dc"] not in self.dcnames:
+                            self.dcnames.append(myTags["dc"])
+                    if "patchGroup" in myTags:
+                        if myTags["patchGroup"] not in self.dcnames:
+                            self.patchgroups.append(myTags["patchGroup"])
                     self.nodeTags[node["host"]] = node["tags"]
                 else:
                     self.nodeTags[node["host"]] = {}
@@ -753,6 +763,12 @@ class automation:
     
     def isNodeStopped(self,nodename):
         return self.NodeHostMapping[nodename]["isStopped"]
+    
+    def isValidPatchGroup(self,patchGroup):
+        return (patchGroup in self.patchgroups)
+    
+    def isValidDC(self,dc):
+        return (dc in self.dcnames)
     
     def getNodeName(self,hostname):
         if hostname in self.HostNodeMapping:
@@ -1059,6 +1075,7 @@ class automation:
         shardedClusters = {}
         for nodeName in self.prjConfig["mongos"]:
             node = self.prjConfig["mongos"][nodeName]
+            node["host"] = nodeName   # Emulate the replicaSet structure
             cluster = node["cluster"]
             hostName = node["hostname"]
             if cluster in shardedClusters:
@@ -1713,7 +1730,7 @@ def deleteToken():
     
 def main(argv=None):
     
-    global myName,logger
+    global myName,logger,cafile
     if argv is None:
         argv = sys.argv
     else:
@@ -1802,7 +1819,7 @@ USAGE
                 return 1
             
 
-        cafile = True 
+
         if args.cacert is not None:
             if args.cacert.lower() == "ignore":
                 cafile = False
@@ -2130,7 +2147,11 @@ USAGE
                     return(1)
                 patchspec = {"nodeName": nodes}
             elif mode == "dc":
-                patchspec = {"dc": objectName}
+                if auto.isValidDC(objectName):
+                    patchspec = {"dc": objectName}
+                else:
+                    logger.logError("Invalid data center name {} must be one of {}".format(objectName,str(auto.dcnames)))
+                    return 1
             elif mode == "hidden":
                 patchspec = {"hidden": "reveal"}
             else:
