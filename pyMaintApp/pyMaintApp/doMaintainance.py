@@ -682,7 +682,7 @@ class automation:
                         if myTags["dc"] not in self.dcnames:
                             self.dcnames.append(myTags["dc"])
                     if "patchGroup" in myTags:
-                        if myTags["patchGroup"] not in self.dcnames:
+                        if myTags["patchGroup"] not in self.patchgroups:
                             self.patchgroups.append(myTags["patchGroup"])
                     self.nodeTags[node["host"]] = node["tags"]
                 else:
