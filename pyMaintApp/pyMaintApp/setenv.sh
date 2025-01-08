@@ -1,0 +1,5 @@
+export OM_DB_URI="mongodb+srv://petew:IqUlfWBZLoEZ28SZ@petesdata.psgxh.mongodb.net/maintDB?retryWrites=true&w=majority"
+export OM_INT_URL="http://ip-172-31-31-101.us-west-1.compute.internal:8080"
+export OM_PRIVATE="6a4deeb9-5308-4198-a32d-946fe598b65a"
+export OM_PUBLIC="youhdnwo"
+export OM_SERVER="https://om.williamson-family.com"

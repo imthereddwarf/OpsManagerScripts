@@ -1,0 +1,23 @@
+{
+    "projectName": "Ldap",
+    "orgId": "6021c581e0b46c6a43cc4b9b",
+    "projectId": "60df9050e0b46c34b4a8d74e",
+    "alerts": ["HOST_DOWN","60df9050e0b46c34b4a8d753","60df9050e0b46c34b4a8d754","HOST_BROKEN","VERSION_CURRENT"],
+    "maintainanceAlertGroups": [],
+    "shardedClusters": [],
+    "replicaSets": [
+        {
+            "replicaSet": "myReplicaSet",
+            "nodes": [
+                {
+                    "nodeName": "myReplicaSet_1",
+                    "hostName": "ip-172-31-27-18.us-west-1.compute.internal",
+                    "tags": {
+                        "dc": "ox",
+                        "patchGroup": "0"
+                    }
+                }
+            ]
+        }
+    ]
+}
